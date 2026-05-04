@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local data / state — anything user-specific or PII-bearing must never enter git.
+data/
+logs/
+*.sqlite
+*.sqlite-*
+.sasi-mcp/
+redaction_audit.jsonl
+tick_state.json
+policy_snapshot.yaml
+probe_questions.txt
+.DS_Store
+.env
+.env.*
+!.env.example

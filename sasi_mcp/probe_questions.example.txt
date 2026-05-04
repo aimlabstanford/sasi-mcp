@@ -1,0 +1,15 @@
+# Probes for the coverage audit. One question per line; comments start with `#`.
+# Drop a copy at ~/.sasi-mcp/probe_questions.txt and tune for what the SASI
+# program actually gets asked every cycle. The audit reports which probes
+# fail to find a match above the configured similarity floor — those are the
+# coverage gaps you should fill.
+when is the application deadline
+how much does the program cost
+what does a typical day look like
+who can apply
+do you accept rising seniors
+is housing provided
+how do I request a recommendation letter
+when do acceptance decisions go out
+can my child use their own laptop
+is there financial aid available

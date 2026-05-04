@@ -1,0 +1,10 @@
+# Current-year facts for the staleness audit.
+# Drop a copy at ~/.sasi-mcp/policy_snapshot.yaml and update annually.
+# Numeric `*_usd` keys are cross-checked against dollar amounts in answers.
+year: 2026
+tuition_usd: 4500
+application_fee_usd: 75
+application_deadline: "2026-02-15"
+program_dates:
+  - "2026-06-22"
+  - "2026-08-01"
