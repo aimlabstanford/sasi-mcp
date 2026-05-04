@@ -1,23 +1,21 @@
 """Read messages from a shared Outlook mailbox via AppleScript.
 
-Thin wrapper around `applescript/list_thread_messages.applescript`. Handles
-the chunked driver loop for backfill (windowed days_back ranges) so the
-AppleScript timeout doesn't stretch.
+Thin wrapper around `applescript/list_thread_messages.applescript`. The
+AppleScript walks newest-first by index and stops once `limit` is reached
+or the date cutoff is exceeded; the inner walk caps at 5000 messages per
+call. For larger backfills, raise `outlook.days_back` and `--limit`
+together — the script terminates early on its own once the cutoff hits.
 """
 
 from __future__ import annotations
 
 import time
-from collections.abc import Iterable
-from datetime import datetime, timedelta, timezone
 
 from sasi_mcp._outlook_bridge import OutlookError, _run_script
 from sasi_mcp.logger import get_logger
 from sasi_mcp.store import MessageRecord
 
 _log = get_logger("sasi_mcp.outlook_reader")
-
-_CHUNK_DAYS = 90  # window size for the chunked backfill driver
 
 
 def _now_iso() -> str:
@@ -82,44 +80,3 @@ def read_folder(
     return out
 
 
-def read_folder_chunked(
-    mailbox_email: str,
-    folder_kind: str,
-    since: datetime,
-    until: datetime | None = None,
-    chunk_days: int = _CHUNK_DAYS,
-    per_chunk_limit: int = 1000,
-) -> Iterable[MessageRecord]:
-    """Yield messages in `chunk_days`-wide windows from `since` to `until`.
-
-    The AppleScript can only express days_back as a single number. To backfill
-    multi-year history without bumping its timeout, we walk forward in chunks
-    by translating each chunk's right edge into a fresh days_back from "now".
-    Duplicates across chunks are filtered out by message_id.
-    """
-    until = until or datetime.now(timezone.utc)
-    seen: set[str] = set()
-    cursor = since
-    while cursor < until:
-        end = min(cursor + timedelta(days=chunk_days), until)
-        days_back = max(1, (datetime.now(timezone.utc) - cursor).days + 1)
-        # AppleScript returns everything within the last `days_back`. We then
-        # clip to messages that fall in [cursor, end).
-        try:
-            messages = read_folder(
-                mailbox_email, folder_kind, days_back=days_back, limit=per_chunk_limit
-            )
-        except OutlookError as exc:
-            _log.warning("outlook_reader.chunk_failed", error=str(exc), since=str(cursor))
-            messages = []
-        for m in messages:
-            if m.message_id in seen:
-                continue
-            seen.add(m.message_id)
-            try:
-                m_dt = datetime.fromisoformat(m.received_at.replace("Z", "+00:00"))
-            except ValueError:
-                continue
-            if cursor <= m_dt < end:
-                yield m
-        cursor = end

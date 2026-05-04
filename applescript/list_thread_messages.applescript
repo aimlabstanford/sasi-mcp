@@ -1,8 +1,5 @@
 -- list_thread_messages.applescript — list messages in a shared mailbox folder
--- as a JSON array. Single new script combining patterns from
--- ledger-bridge's list_messages.applescript (account resolver, date cutoff)
--- and list_unread.applescript (reverse-index walk that avoids `whose` timeout
--- on busy folders, JSON-emit helpers).
+-- as a JSON array.
 --
 -- Usage:
 --   osascript list_thread_messages.applescript <mailbox_email> <folder_kind> <days_back> <limit>
@@ -10,17 +7,21 @@
 -- Args:
 --   mailbox_email   e.g. "summermed@stanford.edu"
 --   folder_kind     "inbox" or "sent"
---   days_back       integer, e.g. 365
---   limit           integer cap on returned messages (script also caps to 5000)
+--   days_back       integer
+--   limit           integer cap (script also caps to 5000)
 --
--- Output: JSON array of {message_id, conversation_id, received_at (ISO),
+-- Resolver model (Outlook 16.108):
+--   Outlook does not expose `every exchange account` enumerably here, even
+--   though messages carry a reachable `account` reference. So we walk top-
+--   level `mail folders`, peek at message 1's account, and match on
+--   `email address of (account of message 1) = mailbox_email` AND
+--   `name of folder = "Inbox" | "Sent Items"`. Folders with zero messages
+--   are skipped (typical for empty side-folders; the real Inbox/Sent Items
+--   for an active mailbox always has a first message).
+--
+-- Per-message JSON keys: message_id, conversation_id, received_at (ISO),
 --   sender_name, sender_email, recipients_to, recipients_cc, subject,
---   body_text (uncapped), folder, account}.
---
--- Resolver order:
---   (a) inbox/sent items folder of the exchange account whose email matches.
---   (b) walk top-level mail folders for one whose name matches the shared
---       mailbox display name, then descend into its Inbox / Sent Items child.
+--   body_text (uncapped), folder, account.
 
 on run argv
     set mailboxEmail to item 1 of argv
@@ -37,19 +38,17 @@ on run argv
     end try
     if limitCount > 5000 then set limitCount to 5000
 
-    tell application "Microsoft Outlook"
-        set targetFolder to my resolveFolder(mailboxEmail, folderKind)
-        if targetFolder is missing value then
-            return "{\"error\":\"folder_not_found\",\"mailbox\":\"" & mailboxEmail & ¬
-                "\",\"kind\":\"" & folderKind & "\"}"
-        end if
+    set targetFolder to my resolveFolder(mailboxEmail, folderKind)
+    if targetFolder is missing value then
+        return "{\"error\":\"folder_not_found\",\"mailbox\":\"" & mailboxEmail & ¬
+            "\",\"kind\":\"" & folderKind & "\"}"
+    end if
 
+    tell application "Microsoft Outlook"
         set cutoff to (current date) - (daysBack * days)
         set totalCount to count of messages of targetFolder
 
         -- Outlook indexes message 1 = newest, so walking i=1..N is newest-first.
-        -- Stop early once we cross the cutoff (with a tolerance window in case
-        -- the order is occasionally non-monotonic on shared mailboxes).
         set collected to {}
         set processed to 0
         set consecutiveOld to 0
@@ -89,94 +88,86 @@ end run
 
 
 on resolveFolder(mailboxEmail, folderKind)
-    tell application "Microsoft Outlook"
-        -- Path A: full Exchange account whose email matches.
-        repeat with a in exchange accounts
-            try
-                set aemail to email address of a
-                if aemail is mailboxEmail then
-                    if folderKind is "sent" then
-                        return sent items folder of a
-                    else
-                        return inbox of a
-                    end if
-                end if
-            end try
-        end repeat
+    -- Match folder names. Outlook surfaces Sent under either name across
+    -- account types; accept both.
+    if folderKind is "inbox" then
+        set targetNames to {"Inbox", "INBOX"}
+    else
+        set targetNames to {"Sent Items", "Sent"}
+    end if
 
-        -- Path B: top-level shared-mailbox folder under the user's account.
-        -- Outlook surfaces shared mailboxes either as a top-level mail folder
-        -- whose name matches the shared display name, or as a child under the
-        -- delegate account. Try the top level first.
-        set sharedName to my localPart(mailboxEmail)
+    tell application "Microsoft Outlook"
         repeat with f in mail folders
             try
                 set fname to name of f as string
-                if (fname contains sharedName) or (fname contains mailboxEmail) then
-                    if folderKind is "sent" then
-                        return my findChild(f, {"Sent Items", "Sent"})
-                    else
-                        return my findChild(f, {"Inbox"})
-                    end if
-                end if
+            on error
+                set fname to ""
             end try
+            if my listContains(targetNames, fname) then
+                try
+                    set msgCount to count of messages of f
+                on error
+                    set msgCount to 0
+                end try
+                if msgCount > 0 then
+                    try
+                        set firstMsg to message 1 of f
+                        set acctEmail to email address of (account of firstMsg)
+                        if acctEmail is mailboxEmail then return f
+                    end try
+                end if
+            end if
         end repeat
     end tell
     return missing value
 end resolveFolder
 
 
-on findChild(parent, candidateNames)
-    tell application "Microsoft Outlook"
-        repeat with cn in candidateNames
-            try
-                set candidate to folder (cn as string) of parent
-                return candidate
-            end try
-        end repeat
-    end tell
-    return missing value
-end findChild
-
-
-on localPart(email)
-    set AppleScript's text item delimiters to "@"
-    set parts to text items of email
-    set AppleScript's text item delimiters to ""
-    if (count of parts) > 0 then return item 1 of parts
-    return email
-end localPart
+on listContains(lst, target)
+    repeat with x in lst
+        if (x as string) is target then return true
+    end repeat
+    return false
+end listContains
 
 
 on serializeMessage(m, mailboxEmail, folderKind)
     tell application "Microsoft Outlook"
         set msgId to id of m as string
-        set msgSubject to my jsonEscape(subject of m)
         try
             set convId to conversation id of m as string
         on error
             set convId to ""
         end try
+        set msgSubject to my jsonEscape(subject of m)
         try
             set bodyRaw to plain text content of m
-            -- NO 2000-char cap. We need the full message for Q&A canonicalization.
             set msgBody to my jsonEscape(bodyRaw)
         on error
             set msgBody to ""
         end try
         set receivedISO to my isoDate(time received of m)
-        set senderObj to sender of m
         try
-            set senderName to my jsonEscape(name of senderObj)
+            set senderObj to sender of m
+            try
+                set senderName to my jsonEscape(name of senderObj)
+            on error
+                set senderName to ""
+            end try
+            try
+                set senderEmail to my jsonEscape(address of senderObj)
+            on error
+                set senderEmail to ""
+            end try
         on error
             set senderName to ""
-        end try
-        try
-            set senderEmail to my jsonEscape(address of senderObj)
-        on error
             set senderEmail to ""
         end try
-        set toList to my serializeRecipients(to recipients of m)
+        try
+            set toList to my serializeRecipients(to recipients of m)
+        on error
+            set toList to "[]"
+        end try
         try
             set ccList to my serializeRecipients(cc recipients of m)
         on error

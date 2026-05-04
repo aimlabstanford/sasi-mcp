@@ -114,8 +114,12 @@ def regex_pre_pass(text: str) -> RedactionResult:
 
 
 def _build_presidio_engine() -> tuple[Any, Any]:
-    """Build the analyzer and anonymizer. Imports Presidio lazily."""
-    from presidio_analyzer import AnalyzerEngine, PatternRecognizer  # type: ignore[import-not-found]
+    """Build the analyzer and anonymizer. Imports Presidio lazily.
+
+    Construction is the slow part (loads spaCy en_core_web_lg). Caller should
+    build once and reuse across many messages.
+    """
+    from presidio_analyzer import AnalyzerEngine, Pattern, PatternRecognizer  # type: ignore[import-not-found]
     from presidio_analyzer.nlp_engine import NlpEngineProvider  # type: ignore[import-not-found]
     from presidio_anonymizer import AnonymizerEngine  # type: ignore[import-not-found]
 
@@ -127,21 +131,11 @@ def _build_presidio_engine() -> tuple[Any, Any]:
     )
     analyzer = AnalyzerEngine(nlp_engine=provider.create_engine(), supported_languages=["en"])
 
-    # Custom recognizer for Stanford 8-digit IDs is also handled by the regex
-    # pre-pass; we still register it with Presidio so anyone running analyzer
-    # alone (e.g. via the API) gets the same coverage.
     stanford_id = PatternRecognizer(
         supported_entity="STANFORD_ID",
-        patterns=[],
-        deny_list=None,
-        deny_list_score=1.0,
+        patterns=[Pattern("stanford_id", r"\b0\d{7}\b", 0.85)],
     )
-    # Use a regex pattern via PatternRecognizer's .patterns list:
-    from presidio_analyzer import Pattern  # type: ignore[import-not-found]
-
-    stanford_id.patterns = [Pattern("stanford_id", r"\b0\d{7}\b", 0.85)]
     analyzer.registry.add_recognizer(stanford_id)
-
     return analyzer, AnonymizerEngine()
 
 

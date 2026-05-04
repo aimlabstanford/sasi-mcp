@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from sasi_mcp.config import OutlookConfig
 from sasi_mcp.logger import get_logger
-from sasi_mcp.outlook_reader import read_folder, read_folder_chunked
+from sasi_mcp.outlook_reader import read_folder
 from sasi_mcp.store import MessageRecord, Store
 from sasi_mcp.thread import derive_qa_pairs, group_threads, summarize_threads
 
@@ -25,18 +25,18 @@ def ingest(
 
     Returns counts: {messages_seen, messages_new, qa_new, threads}.
     """
-    seen_messages: list[MessageRecord] = []
-    if since is None:
-        days = max(1, outlook.days_back)
-        for kind in outlook.folders:
-            seen_messages.extend(
-                read_folder(outlook.mailbox_email, kind, days_back=days, limit=limit)
-            )
+    if since is not None:
+        delta = datetime.now(timezone.utc) - since
+        days = max(1, delta.days + 1)
     else:
-        for kind in outlook.folders:
-            seen_messages.extend(
-                read_folder_chunked(outlook.mailbox_email, kind, since=since)
-            )
+        days = max(1, outlook.days_back)
+
+    seen_messages: list[MessageRecord] = []
+    for kind in outlook.folders:
+        _log.info("ingest.folder_start", kind=kind, days_back=days, limit=limit)
+        seen_messages.extend(
+            read_folder(outlook.mailbox_email, kind, days_back=days, limit=limit)
+        )
 
     new_count = 0
     for m in seen_messages:
