@@ -44,38 +44,42 @@ on run argv
             "\",\"kind\":\"" & folderKind & "\"}"
     end if
 
-    tell application "Microsoft Outlook"
-        set cutoff to (current date) - (daysBack * days)
-        set totalCount to count of messages of targetFolder
+    -- Outlook can take many minutes to walk a busy folder; the inner `tell`
+    -- block defaults to 120s, so wrap it in an explicit larger timeout.
+    with timeout of 1800 seconds
+        tell application "Microsoft Outlook"
+            set cutoff to (current date) - (daysBack * days)
+            set totalCount to count of messages of targetFolder
 
-        -- Outlook indexes message 1 = newest, so walking i=1..N is newest-first.
-        set collected to {}
-        set processed to 0
-        set consecutiveOld to 0
-        set i to 1
+            -- Outlook indexes message 1 = newest, so walking i=1..N is newest-first.
+            set collected to {}
+            set processed to 0
+            set consecutiveOld to 0
+            set i to 1
 
-        repeat while (i ≤ totalCount) and (processed < limitCount)
-            try
-                set m to message i of targetFolder
+            repeat while (i ≤ totalCount) and (processed < limitCount)
                 try
-                    set msgDate to time received of m
-                on error
-                    set msgDate to missing value
+                    set m to message i of targetFolder
+                    try
+                        set msgDate to time received of m
+                    on error
+                        set msgDate to missing value
+                    end try
+                    if (msgDate is not missing value) and (msgDate > cutoff) then
+                        set consecutiveOld to 0
+                        set end of collected to my serializeMessage(m, mailboxEmail, folderKind)
+                        set processed to processed + 1
+                    else if msgDate is not missing value then
+                        set consecutiveOld to consecutiveOld + 1
+                        if consecutiveOld > 500 then exit repeat
+                    end if
+                on error errMsg
+                    -- non-fatal; skip this index
                 end try
-                if (msgDate is not missing value) and (msgDate > cutoff) then
-                    set consecutiveOld to 0
-                    set end of collected to my serializeMessage(m, mailboxEmail, folderKind)
-                    set processed to processed + 1
-                else if msgDate is not missing value then
-                    set consecutiveOld to consecutiveOld + 1
-                    if consecutiveOld > 500 then exit repeat
-                end if
-            on error errMsg
-                -- non-fatal; skip this index
-            end try
-            set i to i + 1
-        end repeat
-    end tell
+                set i to i + 1
+            end repeat
+        end tell
+    end timeout
 
     set output to "["
     repeat with j from 1 to count of collected
