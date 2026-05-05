@@ -193,19 +193,30 @@ end serializeMessage
 
 
 on serializeRecipients(rList)
+    -- Outlook 16 model: a `recipient` (or `to recipient` / `cc recipient`)
+    -- has an `email address` PROPERTY which is itself a record with `name`
+    -- (display) and `address` (the literal email). Reading `name of r` or
+    -- `address of r` directly raises -1700 because the recipient class has
+    -- no such direct properties.
     set output to "["
     set idx to 0
     repeat with r in rList
         set idx to idx + 1
         tell application "Microsoft Outlook"
             try
-                set rName to my jsonEscape(name of r)
+                set ea to email address of r
+                try
+                    set rName to my jsonEscape(name of ea)
+                on error
+                    set rName to ""
+                end try
+                try
+                    set rEmail to my jsonEscape(address of ea)
+                on error
+                    set rEmail to ""
+                end try
             on error
                 set rName to ""
-            end try
-            try
-                set rEmail to my jsonEscape(address of r)
-            on error
                 set rEmail to ""
             end try
         end tell

@@ -7,11 +7,20 @@ Pairing rule (per the plan):
   forms one Q&A pair. A back-and-forth thread can yield multiple pairs.
 - Skip threads with no outbound. Skip outbound-only threads.
 
-Conversation-key fallback (important): if Outlook's `conversation_id` is
-missing/empty, hash on `_norm_subject(subject)` ALONE — NOT subject +
-sender_domain. In a question/answer exchange the inbound is from the parent's
-domain and the outbound is from stanford.edu; mixing domain into the key
-would prevent the pair from ever colliding.
+Conversation-key construction:
+
+* If Outlook's `conversation_id` is set, use it AS THE BASE — but additionally
+  scope by `external_party` (the non-mailbox correspondent). On real summermed
+  data Outlook's conv_id collides across distinct parent inquiries that share
+  a templated subject (e.g. "Re: [Stanford SASI] Missing Medical Forms" arrives
+  from many different parents and all get the same conv_id). Without the
+  external-party scoping, my pairing crosses streams and produces nonsense
+  pairs like "Alok's inbound" → "outbound to Rose".
+* If `conversation_id` is missing/empty, fall back to hashing on
+  `_norm_subject(subject)` ALONE — NOT subject + sender_domain. In a
+  question/answer exchange the inbound is from the parent's domain and the
+  outbound is from stanford.edu; mixing domain into the fallback key would
+  prevent inbound and outbound from ever colliding.
 """
 
 from __future__ import annotations
@@ -39,17 +48,42 @@ def _norm_subject(subject: str) -> str:
     return s
 
 
+def _external_party(message: MessageRecord) -> str:
+    """The non-mailbox correspondent for this message.
+
+    For inbound: the sender. For outbound: the first to-recipient that isn't
+    the mailbox itself. Returns "" if none can be determined (e.g. an outbound
+    addressed only to the mailbox itself, which we don't pair on).
+    """
+    mailbox = message.account.lower()
+    if message.direction == "inbound":
+        return message.sender_email.lower()
+    for r in message.recipients:
+        addr = (r.get("email") or "").lower()
+        if addr and addr != mailbox:
+            return addr
+    return ""
+
+
 def conversation_key(message: MessageRecord) -> str:
-    """Stable thread key. Prefer Outlook's conversation_id; else hash subject only."""
+    """Stable thread key. Outlook's conv_id collides across distinct parent
+    inquiries with templated subjects, so we additionally scope by the
+    external correspondent's address. When conv_id is missing entirely, fall
+    back to subject-only (no domain mixing — see module docstring)."""
+    party = _external_party(message)
     if message.conversation_id:
-        return f"cid:{message.conversation_id}"
+        if party:
+            return f"cid:{message.conversation_id}:{party}"
+        # Outbound with no usable external party — keep it isolated so it
+        # doesn't sweep up unrelated inbound from the same conv_id bucket.
+        return f"cid:{message.conversation_id}:msg:{message.message_id}"
     norm = _norm_subject(message.subject)
     if not norm:
-        # Truly empty subject — fall back to a per-message bucket so isolated
-        # messages never accidentally co-group with each other.
         return f"msg:{message.message_id}"
     digest = hashlib.sha1(norm.encode("utf-8")).hexdigest()[:16]
-    return f"sub:{digest}"
+    if party:
+        return f"sub:{digest}:{party}"
+    return f"sub:{digest}:msg:{message.message_id}"
 
 
 def _now() -> str:

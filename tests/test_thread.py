@@ -32,7 +32,15 @@ def _msg(
     sender: str,
     conversation_id: str = "",
     body: str = "",
+    to: str | None = None,
 ) -> MessageRecord:
+    """Build a MessageRecord. For outbound, `to` populates recipients[0].email
+    so `_external_party` can read the correspondent — without it, the outbound
+    has no usable external party and won't bucket with the inbound it answers.
+    Real Outlook data always populates recipients_to for outbound."""
+    recipients = []
+    if to:
+        recipients.append({"name": "", "email": to})
     return MessageRecord(
         message_id=mid,
         conversation_id=conversation_id,
@@ -42,7 +50,7 @@ def _msg(
         received_at=received,
         sender_email=sender,
         sender_name="",
-        recipients=[],
+        recipients=recipients,
         subject=subject,
         body_text=body,
     )
@@ -66,14 +74,16 @@ def test_conversation_key_uses_outlook_id_when_present():
         mid="1", received="2024-01-01T00:00:00Z", subject="X",
         direction="inbound", sender="parent@example.org", conversation_id="abc123",
     )
-    assert conversation_key(m).startswith("cid:abc123")
+    assert conversation_key(m).startswith("cid:abc123:")
 
 
 def test_conversation_key_falls_back_to_subject_only_so_inbound_outbound_collide():
     """The critical regression test: inbound (parent's domain) and the matching
     outbound (stanford.edu) MUST land in the same bucket when the Outlook
     conversation_id is missing. Hashing on subject + sender_domain would
-    prevent the pair from ever forming."""
+    prevent the pair from ever forming. The external-party scoping uses
+    sender for inbound and to-recipient for outbound, so when the outbound
+    addresses the same parent who wrote in, the keys still collide."""
     inbound = _msg(
         mid="q1", received="2024-01-01T09:00:00Z",
         subject="Re: registration question", direction="inbound",
@@ -82,9 +92,29 @@ def test_conversation_key_falls_back_to_subject_only_so_inbound_outbound_collide
     outbound = _msg(
         mid="a1", received="2024-01-01T10:00:00Z",
         subject="Re: registration question", direction="outbound",
-        sender=MAILBOX,
+        sender=MAILBOX, to="parent@gmail.com",
     )
     assert conversation_key(inbound) == conversation_key(outbound)
+
+
+def test_conversation_key_splits_collisions_on_external_party():
+    """Two messages sharing Outlook's conv_id but addressed to different
+    external parties MUST land in different buckets. This is the real-world
+    case: templated subjects ('Re: [Stanford SASI] Missing Medical Forms')
+    cause Outlook to share a conv_id across distinct parent inquiries; we
+    re-split by external party to keep their threads separate."""
+    alok_inbound = _msg(
+        mid="q1", received="2026-04-27T18:37:00Z",
+        subject="Re: [Stanford SASI] Missing Medical Forms",
+        direction="inbound", sender="alok@gmail.com", conversation_id="2120",
+    )
+    rose_outbound = _msg(
+        mid="a1", received="2026-04-29T11:18:00Z",
+        subject="Re: [Stanford SASI] Missing Medical Forms",
+        direction="outbound", sender=MAILBOX, conversation_id="2120",
+        to="rose@gmail.com",
+    )
+    assert conversation_key(alok_inbound) != conversation_key(rose_outbound)
 
 
 def test_conversation_key_separates_distinct_subjects():
@@ -124,7 +154,8 @@ def test_summarize_threads_marks_outbound_presence():
              direction="inbound", sender="parent@example.com",
              conversation_id="t1"),
         _msg(mid="2", received="2024-01-02T00:00:00Z", subject="x",
-             direction="outbound", sender=MAILBOX, conversation_id="t1"),
+             direction="outbound", sender=MAILBOX, conversation_id="t1",
+             to="parent@example.com"),
     ]
     summaries = summarize_threads(group_threads(msgs))
     assert len(summaries) == 1
@@ -147,7 +178,8 @@ def test_pair_skips_threads_with_no_outbound():
 def test_pair_skips_outbound_only_threads():
     msgs = [
         _msg(mid="2", received="2024-01-02T00:00:00Z", subject="we initiated",
-             direction="outbound", sender=MAILBOX, conversation_id="t1"),
+             direction="outbound", sender=MAILBOX, conversation_id="t1",
+             to="parent@example.com"),
     ]
     assert derive_qa_pairs(msgs) == []
 
@@ -158,7 +190,8 @@ def test_pair_basic_inbound_then_outbound():
              direction="inbound", sender="parent@example.com",
              conversation_id="t1"),
         _msg(mid="2", received="2024-01-01T10:00:00Z", subject="Re: deadline?",
-             direction="outbound", sender=MAILBOX, conversation_id="t1"),
+             direction="outbound", sender=MAILBOX, conversation_id="t1",
+             to="parent@example.com"),
     ]
     pairs = derive_qa_pairs(msgs)
     assert len(pairs) == 1
@@ -177,12 +210,14 @@ def test_pair_multi_step_thread_yields_multiple_pairs():
              direction="inbound", sender="parent@example.com",
              conversation_id="t1"),
         _msg(mid="a1", received="2024-01-01T10:00:00Z", subject="Re: deadline?",
-             direction="outbound", sender=MAILBOX, conversation_id="t1"),
+             direction="outbound", sender=MAILBOX, conversation_id="t1",
+             to="parent@example.com"),
         _msg(mid="q2", received="2024-01-02T09:00:00Z", subject="Re: deadline?",
              direction="inbound", sender="parent@example.com",
              conversation_id="t1"),
         _msg(mid="a2", received="2024-01-02T10:00:00Z", subject="Re: deadline?",
-             direction="outbound", sender=MAILBOX, conversation_id="t1"),
+             direction="outbound", sender=MAILBOX, conversation_id="t1",
+             to="parent@example.com"),
     ]
     pairs = derive_qa_pairs(msgs)
     assert [(p.question_message_id, p.answer_message_id) for p in pairs] == [
@@ -202,7 +237,8 @@ def test_pair_consecutive_inbounds_collapse_to_one_pair():
              direction="inbound", sender="parent@example.com",
              conversation_id="t1"),
         _msg(mid="a1", received="2024-01-01T10:00:00Z", subject="Re: hi",
-             direction="outbound", sender=MAILBOX, conversation_id="t1"),
+             direction="outbound", sender=MAILBOX, conversation_id="t1",
+             to="parent@example.com"),
     ]
     pairs = derive_qa_pairs(msgs)
     assert len(pairs) == 1
@@ -217,8 +253,37 @@ def test_pair_uses_subject_only_fallback_with_no_conversation_id():
              sender="parent@example.com"),
         _msg(mid="a1", received="2024-01-01T10:00:00Z",
              subject="Re: tuition question", direction="outbound",
-             sender=MAILBOX),
+             sender=MAILBOX, to="parent@example.com"),
     ]
     pairs = derive_qa_pairs(msgs)
     assert len(pairs) == 1
     assert pairs[0].question_message_id == "q1"
+
+
+def test_pair_does_not_cross_collision_streams():
+    """The real-world regression: two different parents write in with
+    templated subjects that Outlook collapses to one conv_id. The mailbox
+    replies to each. The naive (conv_id-only) keying paired Alok's inbound
+    with the outbound to Rose. With external-party scoping, each parent's
+    exchange is its own thread."""
+    msgs = [
+        _msg(mid="alok_q", received="2026-04-27T18:37:00Z",
+             subject="Re: [Stanford SASI] Missing Medical Forms",
+             direction="inbound", sender="alok@gmail.com",
+             conversation_id="2120"),
+        _msg(mid="alok_a", received="2026-04-28T09:00:00Z",
+             subject="Re: [Stanford SASI] Missing Medical Forms",
+             direction="outbound", sender=MAILBOX, conversation_id="2120",
+             to="alok@gmail.com"),
+        _msg(mid="rose_q", received="2026-04-28T15:00:00Z",
+             subject="Re: [Stanford SASI] Missing Medical Forms",
+             direction="inbound", sender="rose@gmail.com",
+             conversation_id="2120"),
+        _msg(mid="rose_a", received="2026-04-29T11:18:00Z",
+             subject="Re: [Stanford SASI] Missing Medical Forms",
+             direction="outbound", sender=MAILBOX, conversation_id="2120",
+             to="rose@gmail.com"),
+    ]
+    pairs = derive_qa_pairs(msgs)
+    pair_set = {(p.question_message_id, p.answer_message_id) for p in pairs}
+    assert pair_set == {("alok_q", "alok_a"), ("rose_q", "rose_a")}
