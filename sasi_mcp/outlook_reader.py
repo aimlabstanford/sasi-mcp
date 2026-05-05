@@ -26,15 +26,39 @@ def _direction(sender_email: str, mailbox_email: str) -> str:
     return "outbound" if sender_email.lower() == mailbox_email.lower() else "inbound"
 
 
+def list_account_folders(mailbox_email: str) -> list[dict[str, object]]:
+    """Return [{name, message_count}] for every top-level Outlook mail folder
+    that belongs to `mailbox_email`. Folders with zero messages are omitted —
+    Outlook 16's AppleScript model only lets us identify folder ownership by
+    inspecting the first message's account, so empty folders are unprobeable
+    (and uninteresting for ingest)."""
+    raw = _run_script("list_account_folders.applescript", mailbox_email)
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise OutlookError(f"list_account_folders returned non-list: {type(raw).__name__}")
+    out: list[dict[str, object]] = []
+    for entry in raw:
+        if isinstance(entry, dict) and entry.get("name"):
+            out.append({
+                "name": str(entry["name"]),
+                "message_count": int(entry.get("message_count", 0)),
+            })
+    return out
+
+
 def read_folder(
     mailbox_email: str,
     folder_kind: str,
     days_back: int,
     limit: int = 1000,
 ) -> list[MessageRecord]:
-    """Run the AppleScript once and return parsed MessageRecords."""
-    if folder_kind not in {"inbox", "sent"}:
-        raise ValueError(f"folder_kind must be 'inbox' or 'sent', got {folder_kind!r}")
+    """Run the AppleScript once and return parsed MessageRecords.
+
+    `folder_kind` accepts the canonical aliases "inbox" / "sent" or any
+    literal folder name owned by `mailbox_email` (used for subfolder ingest
+    like "2018 Student and Parent Questions" or "Medical Forms Notification").
+    """
     raw = _run_script(
         "list_thread_messages.applescript",
         mailbox_email,
