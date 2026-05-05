@@ -45,7 +45,20 @@ def _cmd_preflight(args: argparse.Namespace, cfg: Config) -> int:
 
 
 def _cmd_ingest(args: argparse.Namespace, cfg: Config) -> int:
-    from sasi_mcp.ingest import ingest, parse_since
+    from sasi_mcp.ingest import ingest, ingest_all_folders, parse_since
+    if getattr(args, "all_folders", False):
+        days = max(1, cfg.outlook.days_back)
+        since = parse_since(getattr(args, "since", None))
+        if since is not None:
+            from datetime import datetime, timezone
+            days = max(1, (datetime.now(timezone.utc) - since).days + 1)
+        with _store(cfg) as store:
+            counts = ingest_all_folders(
+                store, cfg.outlook,
+                days_back=days, limit_per_folder=args.limit,
+            )
+        print(json.dumps(counts, indent=2))
+        return 0
     since = parse_since(getattr(args, "since", None))
     if not since and getattr(args, "since_last_tick", False):
         with _store(cfg) as store:
@@ -249,7 +262,10 @@ def build_parser() -> argparse.ArgumentParser:
     pi = sub.add_parser("ingest")
     pi.add_argument("--since", type=str, default=None)
     pi.add_argument("--since-last-tick", action="store_true")
-    pi.add_argument("--limit", type=int, default=1000)
+    pi.add_argument("--limit", type=int, default=1000,
+                    help="cap per call (or per folder when --all-folders)")
+    pi.add_argument("--all-folders", action="store_true",
+                    help="walk every mail folder owned by the mailbox, not just Inbox/Sent")
     pi.set_defaults(func=_cmd_ingest)
 
     sub.add_parser("redact").set_defaults(func=_cmd_redact)

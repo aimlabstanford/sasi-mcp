@@ -92,12 +92,15 @@ end run
 
 
 on resolveFolder(mailboxEmail, folderKind)
-    -- Match folder names. Outlook surfaces Sent under either name across
-    -- account types; accept both.
+    -- folderKind "inbox" / "sent" are aliases for the canonical top-level
+    -- folder names; anything else is treated as a literal folder name to
+    -- look up among folders owned by `mailboxEmail`.
     if folderKind is "inbox" then
         set targetNames to {"Inbox", "INBOX"}
-    else
+    else if folderKind is "sent" then
         set targetNames to {"Sent Items", "Sent"}
+    else
+        set targetNames to {folderKind}
     end if
 
     tell application "Microsoft Outlook"
