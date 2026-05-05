@@ -46,7 +46,7 @@ class OutlookCacheError(RuntimeError):
     pass
 
 
-def _run_script(name: str, *args: str, timeout: int = 1800) -> object:
+def _run_script(name: str, *args: str, timeout: int = 7200) -> object:
     script_path = _SCRIPTS_DIR / name
     if not script_path.exists():
         raise OutlookError(f"AppleScript not found: {script_path}")

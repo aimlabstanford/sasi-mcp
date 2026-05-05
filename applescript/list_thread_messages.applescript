@@ -36,7 +36,7 @@ on run argv
     on error
         set limitCount to 1000
     end try
-    if limitCount > 5000 then set limitCount to 5000
+    if limitCount > 50000 then set limitCount to 50000
 
     set targetFolder to my resolveFolder(mailboxEmail, folderKind)
     if targetFolder is missing value then
@@ -46,7 +46,7 @@ on run argv
 
     -- Outlook can take many minutes to walk a busy folder; the inner `tell`
     -- block defaults to 120s, so wrap it in an explicit larger timeout.
-    with timeout of 1800 seconds
+    with timeout of 7200 seconds
         tell application "Microsoft Outlook"
             set cutoff to (current date) - (daysBack * days)
             set totalCount to count of messages of targetFolder
