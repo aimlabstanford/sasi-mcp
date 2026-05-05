@@ -97,20 +97,24 @@ def _cluster_summaries(store: Store) -> list[dict[str, Any]]:
 
 
 def _probe_gaps(store: Store, probe_path: Path, floor: float) -> list[dict[str, Any]]:
-    """Run each probe through the search path; flag those with no hit ≥ floor."""
+    """Run each probe through the search path; flag those with no hit ≥ floor.
+
+    Lines starting with `#` are comments and skipped.
+    """
+    probes = [
+        line.strip()
+        for line in probe_path.read_text().splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
     try:
         from sasi_mcp.embed import cosine_topk, encode_query
     except RuntimeError:
         return []
     candidates = store.list_embeddings()
     if not candidates:
-        return [{"probe": line.strip(), "top_score": None}
-                for line in probe_path.read_text().splitlines() if line.strip()]
+        return [{"probe": p, "top_score": None} for p in probes]
     out: list[dict[str, Any]] = []
-    for line in probe_path.read_text().splitlines():
-        probe = line.strip()
-        if not probe:
-            continue
+    for probe in probes:
         # Embedding model name read from the first stored vector.
         model = candidates[0][2]
         qv = encode_query(model, probe)
