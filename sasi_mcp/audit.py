@@ -125,6 +125,70 @@ def _probe_gaps(store: Store, probe_path: Path, floor: float) -> list[dict[str, 
     return out
 
 
+# --- clustering (populates cluster_id) -------------------------------------
+
+
+def cluster_pairs(store: Store, min_cluster_size: int = 5) -> dict[str, int]:
+    """Run HDBSCAN over the embedded canonical-question vectors and write
+    `cluster_id` back to each pair. Pairs assigned noise (-1 by HDBSCAN
+    convention) get NULL cluster_id. Returns a histogram of cluster sizes.
+
+    Idempotent: safe to re-run; cluster IDs are reassigned each time. The
+    `coverage_clusters` table is also refreshed.
+    """
+    embeddings = store.list_embeddings()
+    if len(embeddings) < min_cluster_size:
+        return {}
+    try:
+        import hdbscan  # type: ignore[import-not-found]
+        import numpy as np
+    except ImportError as exc:
+        raise RuntimeError(
+            "hdbscan + numpy are required. Install the [full] extra."
+        ) from exc
+
+    qa_ids = [qa_id for qa_id, _v, _m in embeddings]
+    matrix = np.asarray([_normalize(v) for _qa, v, _m in embeddings], dtype=np.float32)
+
+    clusterer = hdbscan.HDBSCAN(
+        min_cluster_size=min_cluster_size,
+        metric="euclidean",  # on L2-normalized vectors, euclidean ≈ cosine
+        cluster_selection_method="eom",
+    )
+    labels = clusterer.fit_predict(matrix)
+
+    # Wipe prior cluster_id on all pairs first so removed memberships don't
+    # leak across runs.
+    with store.transaction() as conn:
+        conn.execute("UPDATE qa_pairs SET cluster_id = NULL")
+        conn.execute("DELETE FROM coverage_clusters")
+        for qa_id, label in zip(qa_ids, labels):
+            cid = int(label) if label >= 0 else None
+            if cid is not None:
+                conn.execute(
+                    "UPDATE qa_pairs SET cluster_id = ? WHERE qa_id = ?",
+                    (cid, qa_id),
+                )
+
+    # Write per-cluster centroid for posterity / future ANN if needed.
+    histogram: dict[str, int] = {}
+    cluster_to_qa: dict[int, list[str]] = defaultdict(list)
+    for qa_id, label in zip(qa_ids, labels):
+        if label >= 0:
+            cluster_to_qa[int(label)].append(qa_id)
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with store.transaction() as conn:
+        for cid, members in cluster_to_qa.items():
+            histogram[str(cid)] = len(members)
+            conn.execute(
+                """INSERT INTO coverage_clusters(cluster_id, label, member_count, last_audited_at)
+                   VALUES(?, ?, ?, ?)""",
+                (cid, f"cluster_{cid}", len(members), now),
+            )
+    histogram["_noise"] = int((labels == -1).sum())
+    return histogram
+
+
 # --- staleness -------------------------------------------------------------
 
 
@@ -208,7 +272,19 @@ def staleness(
                            contradicted_by_newer=cn)
 
 
+_MAX_CLUSTER_SIZE_FOR_CONTRADICTION = 30
+
+
 def _within_cluster_contradiction(store: Store, cfg: StalenessConfig, apply: bool) -> list[str]:
+    """Within tight clusters, flag older pairs whose vectors diverge from the
+    newest member.
+
+    Skips clusters with > _MAX_CLUSTER_SIZE_FOR_CONTRADICTION members:
+    HDBSCAN over sentence-transformer embeddings tends to produce one giant
+    "everything the program manager replies to" cluster on real corpora,
+    which would generate thousands of false-positive contradiction flags.
+    The premise — "the same question asked twice with disagreeing answers" —
+    doesn't apply to broad topic clusters."""
     pairs = {p.qa_id: p for p in store.list_qa_pairs(status="approved", include_stale=True)
              if not p.user_overridden_stale}
     embeddings = {qa_id: vec for qa_id, vec, _m in store.list_embeddings()}
@@ -219,6 +295,8 @@ def _within_cluster_contradiction(store: Store, cfg: StalenessConfig, apply: boo
     flagged: list[str] = []
     for members in by_cluster.values():
         if len(members) < 2:
+            continue
+        if len(members) > _MAX_CLUSTER_SIZE_FOR_CONTRADICTION:
             continue
         members.sort(key=lambda p: p.received_at)
         newest = members[-1]

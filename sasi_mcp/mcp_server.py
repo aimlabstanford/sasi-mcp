@@ -139,41 +139,38 @@ def serve(config: Config) -> None:
             "mcp package not installed. Install with: pip install -e '.[full]'"
         ) from exc
 
-    # Capture the module-level implementations under aliases so the inner
-    # tool functions can carry the canonical MCP-tool names without shadowing.
-    _search = search_sasi_faq
-    _list_categories = list_categories
-    _get_qa_pair = get_qa_pair
-    _flag = flag_qa_pair
-    _stats = corpus_stats
+    # The inner @server.tool() functions are intentionally named to match the
+    # MCP-published tool names, which shadows this module's same-named impls
+    # in the function scope. We resolve through the module to call the impls.
+    import sasi_mcp.mcp_server as impl_mod
 
     server = FastMCP(config.mcp.name)
     store = Store(config.db_path)
 
     @server.tool()
-    def search_sasi_faq(  # noqa: F811 — registered under this canonical name
+    def search_sasi_faq(  # noqa: F811
         question: str,
         top_k: int = 5,
         category: str | None = None,
         include_stale: bool = False,
     ) -> list[dict[str, Any]]:
-        return _search(config, store, question, top_k, category, include_stale)
+        return impl_mod.search_sasi_faq(config, store, question, top_k, category, include_stale)
 
     @server.tool()
     def list_categories() -> dict[str, int]:  # noqa: F811
-        return _list_categories(store)
+        return impl_mod.list_categories(store)
 
     @server.tool()
     def get_qa_pair(qa_id: str) -> dict[str, Any] | None:  # noqa: F811
-        return _get_qa_pair(store, qa_id)
+        return impl_mod.get_qa_pair(store, qa_id)
 
     @server.tool()
     def flag_qa_pair(qa_id: str, reason: str) -> dict[str, Any]:  # noqa: F811
-        return _flag(store, qa_id, reason)
+        return impl_mod.flag_qa_pair(store, qa_id, reason)
 
     @server.tool()
     def corpus_stats() -> dict[str, Any]:  # noqa: F811
-        return _stats(store)
+        return impl_mod.corpus_stats(store)
 
     _log.info("mcp_server.start", name=config.mcp.name)
     server.run()

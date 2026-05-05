@@ -173,6 +173,14 @@ def _cmd_audit(args: argparse.Namespace, cfg: Config) -> int:
                 "snapshot_mismatch": r.snapshot_mismatch,
                 "contradicted_by_newer": r.contradicted_by_newer,
             }, indent=2))
+        elif args.audit_subcommand == "cluster":
+            histogram = audit.cluster_pairs(store, min_cluster_size=args.min_cluster_size)
+            n_clusters = len([k for k in histogram if k != "_noise"])
+            print(json.dumps({
+                "n_clusters": n_clusters,
+                "noise_count": histogram.get("_noise", 0),
+                "sizes": {k: v for k, v in histogram.items() if k != "_noise"},
+            }, indent=2))
         elif args.audit_subcommand == "evergreen":
             scores = audit.evergreen(store, cfg.staleness)
             print(json.dumps(scores, indent=2))
@@ -265,6 +273,8 @@ def build_parser() -> argparse.ArgumentParser:
     pa_sub = pa.add_subparsers(dest="audit_subcommand", required=True)
     pa_sub.add_parser("coverage")
     pa_sub.add_parser("staleness")
+    pc = pa_sub.add_parser("cluster")
+    pc.add_argument("--min-cluster-size", type=int, default=5)
     pa_sub.add_parser("evergreen")
     pq = pa_sub.add_parser("queries")
     pq.add_argument("--sample", type=int, default=20)

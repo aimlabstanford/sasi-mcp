@@ -46,6 +46,7 @@ python -m sasi_mcp embed
 python -m sasi_mcp serve
 
 python -m sasi_mcp audit coverage
+python -m sasi_mcp audit cluster --min-cluster-size 5
 python -m sasi_mcp audit staleness
 python -m sasi_mcp audit evergreen
 python -m sasi_mcp audit queries --sample 20
@@ -62,6 +63,26 @@ Everything lives under `~/.sasi-mcp/`:
 - `redaction_audit.jsonl` — per-pair redaction counts (never the matched strings)
 - `policy_snapshot.yaml` — current-year facts for staleness cross-check
 - `probe_questions.txt` — known FAQ probes for coverage audit
+
+## Register the MCP server with Claude Code
+
+```bash
+claude mcp add sasi-faq -- $(pwd)/.venv/bin/python -m sasi_mcp serve
+claude mcp list   # should show sasi-faq: ✓ Connected
+```
+
+For Claude Desktop, add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "sasi-faq": {
+      "command": "/absolute/path/to/.venv/bin/python",
+      "args": ["-m", "sasi_mcp", "serve"]
+    }
+  }
+}
+```
 
 ## Status
 
