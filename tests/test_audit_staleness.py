@@ -141,11 +141,28 @@ def test_within_cluster_contradiction_marks_older(store: Store, tmp_path: Path):
     store.upsert_embedding("new", [0.0, 1.0, 0.0], model="m")
     snapshot = tmp_path / "snap.yaml"
     snapshot.write_text("year: 2026\n")
+    # Contradiction signal is opt-in (apply_contradictions=True) since it has
+    # a high false-positive rate on real corpora; see staleness() docstring.
     report = staleness(store, snapshot, StalenessConfig(),
-                       now=datetime(2026, 1, 1, tzinfo=timezone.utc))
+                       now=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                       apply_contradictions=True)
     assert "old" in report.contradicted_by_newer
     assert store.get_qa_pair("old").stale_reason == "contradicted_by_newer"
     assert store.get_qa_pair("new").stale_reason is None
+
+
+def test_contradiction_signal_not_applied_by_default(store: Store, tmp_path: Path):
+    _approve(store, "old", received="2021-01-01T00:00:00Z", cluster_id=1)
+    _approve(store, "new", received="2025-01-01T00:00:00Z", cluster_id=1)
+    store.upsert_embedding("old", [1.0, 0.0, 0.0], model="m")
+    store.upsert_embedding("new", [0.0, 1.0, 0.0], model="m")
+    snapshot = tmp_path / "snap.yaml"
+    snapshot.write_text("year: 2026\n")
+    report = staleness(store, snapshot, StalenessConfig(),
+                       now=datetime(2026, 1, 1, tzinfo=timezone.utc))
+    # Reported in the return value, but NOT written to the row.
+    assert "old" in report.contradicted_by_newer
+    assert store.get_qa_pair("old").stale_reason is None
 
 
 def test_within_cluster_no_contradiction_when_vectors_agree(store: Store, tmp_path: Path):

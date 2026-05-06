@@ -128,10 +128,19 @@ def _probe_gaps(store: Store, probe_path: Path, floor: float) -> list[dict[str, 
 # --- clustering (populates cluster_id) -------------------------------------
 
 
-def cluster_pairs(store: Store, min_cluster_size: int = 5) -> dict[str, int]:
+def cluster_pairs(store: Store, min_cluster_size: int = 5,
+                  per_category: bool = False) -> dict[str, int]:
     """Run HDBSCAN over the embedded canonical-question vectors and write
     `cluster_id` back to each pair. Pairs assigned noise (-1 by HDBSCAN
     convention) get NULL cluster_id. Returns a histogram of cluster sizes.
+
+    With `per_category=True`, HDBSCAN runs separately within each `category`
+    bucket. This is what we actually want for contradiction detection — a
+    global HDBSCAN run on a real corpus produces one giant "everything the
+    program manager answers" cluster, which the within-cluster contradiction
+    pass then has to skip (see `_MAX_CLUSTER_SIZE_FOR_CONTRADICTION`).
+    Per-category bucketing keeps clusters scoped to one topic, so older
+    pairs are only compared against newer pairs in the same topic.
 
     Idempotent: safe to re-run; cluster IDs are reassigned each time. The
     `coverage_clusters` table is also refreshed.
@@ -146,6 +155,9 @@ def cluster_pairs(store: Store, min_cluster_size: int = 5) -> dict[str, int]:
         raise RuntimeError(
             "hdbscan + numpy are required. Install the [full] extra."
         ) from exc
+
+    if per_category:
+        return _cluster_per_category(store, embeddings, min_cluster_size, hdbscan, np)
 
     qa_ids = [qa_id for qa_id, _v, _m in embeddings]
     matrix = np.asarray([_normalize(v) for _qa, v, _m in embeddings], dtype=np.float32)
@@ -189,6 +201,79 @@ def cluster_pairs(store: Store, min_cluster_size: int = 5) -> dict[str, int]:
     return histogram
 
 
+def _cluster_per_category(store, embeddings, min_cluster_size, hdbscan, np) -> dict[str, int]:
+    """Per-category HDBSCAN. Each category gets its own ID space; we pack
+    them into a single global int via `category_offset + sub_label` so the
+    `qa_pairs.cluster_id` column stays a flat int."""
+    pairs = {p.qa_id: p for p in store.list_qa_pairs(include_stale=True)}
+    by_cat_qa_ids: dict[str, list[str]] = defaultdict(list)
+    by_cat_vecs: dict[str, list[list[float]]] = defaultdict(list)
+    for qa_id, vec, _m in embeddings:
+        p = pairs.get(qa_id)
+        cat = (p.category if p else None) or "_uncategorized"
+        by_cat_qa_ids[cat].append(qa_id)
+        by_cat_vecs[cat].append(_normalize(vec))
+
+    # Assign each category a 10000-wide slot so sub-labels never collide.
+    sorted_cats = sorted(by_cat_qa_ids.keys())
+    cat_offsets: dict[str, int] = {cat: (i + 1) * 10000 for i, cat in enumerate(sorted_cats)}
+
+    histogram: dict[str, int] = {}
+    cluster_to_qa: dict[int, list[str]] = defaultdict(list)
+    cluster_label_for: dict[int, str] = {}
+
+    for cat in sorted_cats:
+        qa_ids = by_cat_qa_ids[cat]
+        if len(qa_ids) < min_cluster_size:
+            continue
+        matrix = np.asarray(by_cat_vecs[cat], dtype=np.float32)
+        # Leaf-mode picks the smallest, tightest sub-clusters from the
+        # condensed-tree hierarchy. EOM (the default) prefers broad
+        # "excess-of-mass" clusters which on a category bucket recreate
+        # the giant-cluster problem we were trying to escape — for example,
+        # all 471 finance_billing pairs land in one EOM cluster, which is
+        # useless for contradiction detection. Leaf clusters average 5–15
+        # members and represent near-paraphrase neighborhoods.
+        clusterer = hdbscan.HDBSCAN(
+            min_cluster_size=min_cluster_size,
+            metric="euclidean",
+            cluster_selection_method="leaf",
+        )
+        labels = clusterer.fit_predict(matrix)
+        offset = cat_offsets[cat]
+        for qa_id, label in zip(qa_ids, labels):
+            if label < 0:
+                continue
+            global_cid = offset + int(label)
+            cluster_to_qa[global_cid].append(qa_id)
+            cluster_label_for[global_cid] = f"{cat}/{int(label)}"
+
+    with store.transaction() as conn:
+        conn.execute("UPDATE qa_pairs SET cluster_id = NULL")
+        conn.execute("DELETE FROM coverage_clusters")
+        for cid, members in cluster_to_qa.items():
+            for qa_id in members:
+                conn.execute(
+                    "UPDATE qa_pairs SET cluster_id = ? WHERE qa_id = ?",
+                    (cid, qa_id),
+                )
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with store.transaction() as conn:
+        for cid, members in cluster_to_qa.items():
+            histogram[str(cid)] = len(members)
+            label = cluster_label_for[cid]
+            conn.execute(
+                """INSERT INTO coverage_clusters(cluster_id, label, member_count, last_audited_at)
+                   VALUES(?, ?, ?, ?)""",
+                (cid, label, len(members), now),
+            )
+    # `_noise` here = pairs with embeddings that didn't land in any category cluster.
+    clustered_ids = {qa_id for members in cluster_to_qa.values() for qa_id in members}
+    histogram["_noise"] = sum(1 for qa_id, _v, _m in embeddings if qa_id not in clustered_ids)
+    return histogram
+
+
 # --- staleness -------------------------------------------------------------
 
 
@@ -226,11 +311,18 @@ def staleness(
     cfg: StalenessConfig,
     now: datetime | None = None,
     apply: bool = True,
+    apply_contradictions: bool = False,
 ) -> StalenessReport:
     """Detect stale-candidate pairs. Returns a report of qa_ids by reason.
 
-    With `apply=True` (default), each detected pair has its `stale_reason`
-    written to the store unless `user_overridden_stale=1` already.
+    With `apply=True` (default) the deterministic signals (year_bound expiry,
+    snapshot dollar-amount mismatch) are written to the store. The heuristic
+    `contradicted_by_newer` signal is *not* auto-applied unless
+    `apply_contradictions=True`: HDBSCAN clusters group "questions with
+    similar vectors", which on real corpora frequently mixes sub-topics
+    within a category and produces ~95% false-positive rate at the default
+    threshold. Treat the contradiction list as a manual review queue, not
+    a ground-truth flag.
     """
     now = now or datetime.now(timezone.utc)
     snapshot = _load_snapshot(snapshot_path)
@@ -265,26 +357,27 @@ def staleness(
             if apply:
                 store.mark_stale(p.qa_id, "snapshot_mismatch")
 
-    # 3) within-cluster contradiction
-    cn = _within_cluster_contradiction(store, cfg, apply=apply)
+    # 3) within-cluster contradiction (heuristic — disabled by default)
+    cn = _within_cluster_contradiction(store, cfg, apply=apply_contradictions)
 
     return StalenessReport(year_bound_expired=yb, snapshot_mismatch=sm,
                            contradicted_by_newer=cn)
 
 
-_MAX_CLUSTER_SIZE_FOR_CONTRADICTION = 30
+_MAX_CLUSTER_SIZE_FOR_CONTRADICTION = 500
 
 
 def _within_cluster_contradiction(store: Store, cfg: StalenessConfig, apply: bool) -> list[str]:
     """Within tight clusters, flag older pairs whose vectors diverge from the
     newest member.
 
-    Skips clusters with > _MAX_CLUSTER_SIZE_FOR_CONTRADICTION members:
-    HDBSCAN over sentence-transformer embeddings tends to produce one giant
-    "everything the program manager replies to" cluster on real corpora,
-    which would generate thousands of false-positive contradiction flags.
-    The premise — "the same question asked twice with disagreeing answers" —
-    doesn't apply to broad topic clusters."""
+    Skips clusters with > _MAX_CLUSTER_SIZE_FOR_CONTRADICTION members. The cap
+    used to be 30 because a global HDBSCAN run produced one giant "everything
+    the program manager replies to" cluster spanning unrelated topics, and
+    flagging older pairs against an unrelated newer pair generated thousands
+    of false positives. Per-category clustering (`audit cluster
+    --per-category`) keeps clusters topically coherent, so the cap is now
+    only a safety belt against pathological category buckets."""
     pairs = {p.qa_id: p for p in store.list_qa_pairs(status="approved", include_stale=True)
              if not p.user_overridden_stale}
     embeddings = {qa_id: vec for qa_id, vec, _m in store.list_embeddings()}
