@@ -170,10 +170,14 @@ def unpack_vector(blob: bytes) -> list[float]:
 class Store:
     """Thin DAO over a single SQLite file. All methods are synchronous."""
 
-    def __init__(self, db_path: Path) -> None:
+    def __init__(self, db_path: Path, *, check_same_thread: bool = True) -> None:
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(db_path))
+        # `check_same_thread=False` is needed when the same Store is shared
+        # across the FastAPI worker pool (Phase B HTTP server). Read-mostly
+        # workload + SQLite's default serialized threading mode means this is
+        # safe; writes are still single-threaded in those code paths.
+        self._conn = sqlite3.connect(str(db_path), check_same_thread=check_same_thread)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.executescript(SCHEMA_SQL)

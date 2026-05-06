@@ -168,6 +168,33 @@ def _cmd_serve(args: argparse.Namespace, cfg: Config) -> int:
     return 0
 
 
+def _cmd_http_serve(args: argparse.Namespace, cfg: Config) -> int:
+    """Run the read-only HTTP transport. The bearer token and HMAC secret
+    are read from disk so they don't show up in `ps` or shell history."""
+    from sasi_mcp.http_server import serve_http
+
+    token_path = Path(args.token_file).expanduser()
+    if not token_path.is_file():
+        print(f"token file not found: {token_path}", file=sys.stderr)
+        return 2
+    token = token_path.read_text(encoding="utf-8").strip()
+    if not token:
+        print(f"token file is empty: {token_path}", file=sys.stderr)
+        return 2
+
+    secret_path = Path(args.secret_file).expanduser()
+    if not secret_path.is_file():
+        print(f"secret file not found: {secret_path}", file=sys.stderr)
+        return 2
+    secret = secret_path.read_bytes().strip()
+    if not secret:
+        print(f"secret file is empty: {secret_path}", file=sys.stderr)
+        return 2
+
+    serve_http(cfg, bind=args.bind, port=args.port, token=token, secret=secret)
+    return 0
+
+
 def _cmd_stats(args: argparse.Namespace, cfg: Config) -> int:
     with _store(cfg) as store:
         print(json.dumps(store.stats(), indent=2, default=str))
@@ -304,6 +331,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("embed").set_defaults(func=_cmd_embed)
     sub.add_parser("serve").set_defaults(func=_cmd_serve)
+
+    ph = sub.add_parser("http-serve",
+                        help="run the read-only HTTP transport for Desk-style clients")
+    ph.add_argument("--bind", default="127.0.0.1",
+                    help="bind address (default: 127.0.0.1; cloudflared/tailscale "
+                         "front this — do not bind 0.0.0.0 in production)")
+    ph.add_argument("--port", type=int, default=8765)
+    ph.add_argument("--token-file", required=True,
+                    help="path to a file containing the bearer token")
+    ph.add_argument("--secret-file", required=True,
+                    help="path to a file containing the HMAC secret used to derive "
+                         "opaque thread_ids; rotating it invalidates client URLs")
+    ph.set_defaults(func=_cmd_http_serve)
     sub.add_parser("stats").set_defaults(func=_cmd_stats)
 
     pa = sub.add_parser("audit")
