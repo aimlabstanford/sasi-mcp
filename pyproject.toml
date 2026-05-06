@@ -24,6 +24,8 @@ full = [
   "hdbscan>=0.8",
   "numpy>=1.26",
   "httpx>=0.27",
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.27",
 ]
 dev = [
   "pytest>=8.1",
@@ -31,6 +33,8 @@ dev = [
   "mypy>=1.9",
   "ruff>=0.4",
   "types-pyyaml",
+  "fastapi>=0.110",
+  "httpx>=0.27",
 ]
 
 [project.scripts]
