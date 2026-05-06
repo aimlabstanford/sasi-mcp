@@ -460,6 +460,10 @@ class Store:
         ).fetchall()
         return [(r["qa_id"], unpack_vector(r["vector"]), r["model"]) for r in rows]
 
+    def delete_embedding(self, qa_id: str) -> None:
+        self._conn.execute("DELETE FROM embeddings WHERE qa_id = ?", (qa_id,))
+        self._conn.commit()
+
     # ---- query_log ------------------------------------------------------
 
     def log_query(

@@ -18,6 +18,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from sasi_mcp.logger import get_logger
+from sasi_mcp.quality import is_quality_pair
 from sasi_mcp.store import QAPair, Store
 
 _log = get_logger("sasi_mcp.review")
@@ -114,8 +115,9 @@ def _split_edited(text: str, pair: QAPair) -> tuple[str, str]:
 def auto_approve(store: Store, threshold: float, reviewer: str = "auto") -> int:
     pending = store.list_qa_pairs(status="pending")
     n = 0
+    rejected = 0
     for p in pending:
-        if (
+        if not (
             p.classifier_confidence is not None
             and p.extract_confidence is not None
             and p.classifier_confidence >= threshold
@@ -123,7 +125,38 @@ def auto_approve(store: Store, threshold: float, reviewer: str = "auto") -> int:
             and p.canonical_question
             and p.canonical_answer
         ):
-            store.update_qa_review(p.qa_id, "approved", reviewer)
-            n += 1
-    print(f"auto-approved {n} pairs at threshold {threshold:.2f}", file=sys.stderr)
+            continue
+        ok, _ = is_quality_pair(p.canonical_question, p.canonical_answer)
+        if not ok:
+            rejected += 1
+            continue
+        store.update_qa_review(p.qa_id, "approved", reviewer)
+        n += 1
+    print(
+        f"auto-approved {n} pairs at threshold {threshold:.2f} "
+        f"(quality-rejected {rejected})",
+        file=sys.stderr,
+    )
     return n
+
+
+def quality_audit(store: Store, *, apply: bool = False) -> dict[str, int]:
+    """Walk approved pairs, demote any that fail the quality filter back to pending
+    and drop their embeddings so retrieval stops surfacing them.
+
+    `apply=False` is a dry run: returns the histogram of failure reasons without
+    touching the DB. `apply=True` executes the demotions."""
+    approved = store.list_qa_pairs(status="approved")
+    by_reason: dict[str, int] = {}
+    demoted_ids: list[str] = []
+    for p in approved:
+        ok, reason = is_quality_pair(p.canonical_question, p.canonical_answer)
+        if ok:
+            continue
+        by_reason[reason] = by_reason.get(reason, 0) + 1
+        demoted_ids.append(p.qa_id)
+    if apply:
+        for qid in demoted_ids:
+            store.update_qa_review(qid, "pending", "quality_audit")
+            store.delete_embedding(qid)
+    return {"approved_seen": len(approved), "demoted": len(demoted_ids), **{f"reason_{k}": v for k, v in by_reason.items()}}

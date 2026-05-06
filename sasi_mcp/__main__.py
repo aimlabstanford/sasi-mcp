@@ -142,6 +142,18 @@ def _cmd_review(args: argparse.Namespace, cfg: Config) -> int:
     return 0
 
 
+def _cmd_quality_audit(args: argparse.Namespace, cfg: Config) -> int:
+    """Walk approved pairs, demote ones that fail the cheap pair-quality filter.
+
+    Default is a dry run that prints the failure-reason histogram. Pass
+    --apply to actually demote (review_status='pending', embedding deleted)."""
+    from sasi_mcp.review import quality_audit
+    with _store(cfg) as store:
+        result = quality_audit(store, apply=args.apply)
+    print(json.dumps(result, indent=2))
+    return 0
+
+
 def _cmd_embed(args: argparse.Namespace, cfg: Config) -> int:
     from sasi_mcp.embed import embed_approved
     with _store(cfg) as store:
@@ -187,7 +199,11 @@ def _cmd_audit(args: argparse.Namespace, cfg: Config) -> int:
                 "contradicted_by_newer": r.contradicted_by_newer,
             }, indent=2))
         elif args.audit_subcommand == "cluster":
-            histogram = audit.cluster_pairs(store, min_cluster_size=args.min_cluster_size)
+            histogram = audit.cluster_pairs(
+                store,
+                min_cluster_size=args.min_cluster_size,
+                per_category=args.per_category,
+            )
             n_clusters = len([k for k in histogram if k != "_noise"])
             print(json.dumps({
                 "n_clusters": n_clusters,
@@ -281,6 +297,11 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--stale", action="store_true")
     pr.set_defaults(func=_cmd_review)
 
+    pq = sub.add_parser("quality-audit")
+    pq.add_argument("--apply", action="store_true",
+                    help="actually demote failing pairs (default: dry run)")
+    pq.set_defaults(func=_cmd_quality_audit)
+
     sub.add_parser("embed").set_defaults(func=_cmd_embed)
     sub.add_parser("serve").set_defaults(func=_cmd_serve)
     sub.add_parser("stats").set_defaults(func=_cmd_stats)
@@ -291,6 +312,9 @@ def build_parser() -> argparse.ArgumentParser:
     pa_sub.add_parser("staleness")
     pc = pa_sub.add_parser("cluster")
     pc.add_argument("--min-cluster-size", type=int, default=5)
+    pc.add_argument("--per-category", action="store_true",
+                    help="run HDBSCAN within each classifier category bucket "
+                         "instead of one global pass (recommended)")
     pa_sub.add_parser("evergreen")
     pq = pa_sub.add_parser("queries")
     pq.add_argument("--sample", type=int, default=20)
